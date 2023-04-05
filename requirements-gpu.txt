@@ -6,3 +6,5 @@ tqdm
 flask
 seaborn
 pillow
+apscheduler
+pymavlink

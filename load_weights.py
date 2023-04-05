@@ -4,8 +4,8 @@ import numpy as np
 from yolov3_tf2.models import YoloV3, YoloV3Tiny
 from yolov3_tf2.utils import load_darknet_weights
 
-flags.DEFINE_string('weights', 'weights/yolov3.weights', 'path to weights file')
-flags.DEFINE_string('output', 'weights/yolov3.tf', 'path to output')
+flags.DEFINE_string('weights', '/Users/scuser/Documents/code/drone/Object-Detection-API/yolov3.weights', 'path to weights file')
+flags.DEFINE_string('output', '/Users/scuser/Documents/code/drone/Object-Detection-API/weights/yolov3.tf', 'path to output')
 flags.DEFINE_boolean('tiny', False, 'yolov3 or yolov3-tiny')
 flags.DEFINE_integer('num_classes', 80, 'number of classes in the model')
 

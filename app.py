@@ -1,137 +1,263 @@
+import os
+import json
 import time
-from absl import app, logging
+import pyodbc
 import cv2
 import numpy as np
 import tensorflow as tf
-from yolov3_tf2.models import (
-    YoloV3, YoloV3Tiny
-)
-from yolov3_tf2.dataset import transform_images, load_tfrecord_dataset
-from yolov3_tf2.utils import draw_outputs
-from flask import Flask, request, Response, jsonify, send_from_directory, abort
-import os
+from flask import Flask, request, jsonify
+from flask_restful import reqparse, Api, Resource
+from yolov3_tf2.models import YoloV3
+from yolov3_tf2.dataset import transform_images
+import pymavlink.mavutil as mavutil
+from flask_cors import CORS
 
-# customize your API through the following parameters
-classes_path = './data/labels/coco.names'
-weights_path = './weights/yolov3.tf'
-tiny = False                    # set to True if using a Yolov3 Tiny model
-size = 416                      # size images are resized to for model
-output_path = './detections/'   # path to output folder where images with detections are saved
-num_classes = 80                # number of classes in model
-
-# load in weights and classes
-physical_devices = tf.config.experimental.list_physical_devices('GPU')
-if len(physical_devices) > 0:
-    tf.config.experimental.set_memory_growth(physical_devices[0], True)
-
-if tiny:
-    yolo = YoloV3Tiny(classes=num_classes)
-else:
-    yolo = YoloV3(classes=num_classes)
-
-yolo.load_weights(weights_path).expect_partial()
-print('weights loaded')
-
-class_names = [c.strip() for c in open(classes_path).readlines()]
-print('classes loaded')
-
+from apscheduler.schedulers.background import BackgroundScheduler
+from datetime import datetime, timedelta
 # Initialize Flask application
 app = Flask(__name__)
+CORS(app, origins=['http://localhost:4200'])
 
-# API that returns JSON with classes found in images
-@app.route('/detections', methods=['POST'])
-def get_detections():
-    raw_images = []
-    images = request.files.getlist("images")
-    image_names = []
-    for image in images:
-        image_name = image.filename
-        image_names.append(image_name)
-        image.save(os.path.join(os.getcwd(), image_name))
-        img_raw = tf.image.decode_image(
-            open(image_name, 'rb').read(), channels=3)
-        raw_images.append(img_raw)
-        
-    num = 0
-    
-    # create list for final response
-    response = []
 
-    for j in range(len(raw_images)):
-        # create list of responses for current image
-        responses = []
-        raw_img = raw_images[j]
-        num+=1
-        img = tf.expand_dims(raw_img, 0)
-        img = transform_images(img, size)
 
-        t1 = time.time()
-        boxes, scores, classes, nums = yolo(img)
-        t2 = time.time()
-        print('time: {}'.format(t2 - t1))
+# Setup Flask Restful framework
+api = Api(app)
+parser = reqparse.RequestParser()
 
-        print('detections:')
-        for i in range(nums[0]):
-            print('\t{}, {}, {}'.format(class_names[int(classes[0][i])],
-                                            np.array(scores[0][i]),
-                                            np.array(boxes[0][i])))
-            responses.append({
-                "class": class_names[int(classes[0][i])],
-                "confidence": float("{0:.2f}".format(np.array(scores[0][i])*100))
+# Create connection to Azure SQL
+server = 'tcp:practicumserver-2023.database.windows.net'
+database = 'Practicum'
+username = 'practicumstudent'
+password = 'Salamah2023'
+
+# Connection string
+connection_string = f'DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={server};DATABASE={database};UID={username};PWD={password}'
+
+def get_db_connection():
+    return pyodbc.connect(connection_string)
+
+# YOLOv3 configuration
+weights_path = './weights/yolov3.tf'
+classes_path = './data/labels/coco.names'
+size = 416
+num_classes = 80
+
+# Load YOLOv3 model
+yolo = YoloV3(classes=num_classes)
+yolo.load_weights(weights_path).expect_partial()
+
+class_names = [c.strip() for c in open(classes_path).readlines()]
+
+class DetectionSession(Resource):
+    def get(self, session_id):
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        query = f"SELECT * FROM DetectionSessions WHERE SessionId = {session_id}"
+        cursor.execute(query)
+        result = cursor.fetchone()
+
+        if not result:
+            return {"error": "No session found for the provided session ID"}, 404
+
+        session = {"SessionId": result[0], "CreatedAt": str(result[1])}
+        return session, 200
+class DetectionSessionPost(Resource):
+
+    def post(self):
+        raw_images = []
+        images = request.files.getlist("images")
+        local_time = time.localtime()
+
+        # Generate session ID
+        session_id = int(f"{local_time.tm_year}{local_time.tm_mon:02d}{local_time.tm_mday:02d}{local_time.tm_hour:02d}{local_time.tm_min:02d}{local_time.tm_sec:02d}")
+
+        for image in images:
+            image.save(os.path.join(os.getcwd(), image.filename))
+            img_raw = tf.image.decode_image(
+                open(image.filename, 'rb').read(), channels=3)
+            raw_images.append(img_raw)
+
+        response = []
+
+        for j, raw_img in enumerate(raw_images):
+            img = tf.expand_dims(raw_img, 0)
+            img = transform_images(img, size)
+            boxes, scores, classes, nums = yolo(img)
+
+            detected_count = 0
+            for i in range(nums[0]):
+                if class_names[int(classes[0][i])] == "person" and float("{0:.2f}".format(np.array(scores[0][i]) * 100)) >= 85.50:
+                    detected_count += 1
+
+            response.append({
+                "image_index": j + 1,
+                "detections": detected_count
             })
-        response.append({
-            "image": image_names[j],
-            "detections": responses
-        })
-        img = cv2.cvtColor(raw_img.numpy(), cv2.COLOR_RGB2BGR)
-        img = draw_outputs(img, (boxes, scores, classes, nums), class_names)
-        cv2.imwrite(output_path + 'detection' + str(num) + '.jpg', img)
-        print('output saved to: {}'.format(output_path + 'detection' + str(num) + '.jpg'))
 
-    #remove temporary images
-    for name in image_names:
-        os.remove(name)
-    try:
-        return jsonify({"response":response}), 200
-    except FileNotFoundError:
-        abort(404)
+        # Save session and detections into the Azure SQL tables
+        conn = get_db_connection()
+        cursor = conn.cursor()
 
-# API that returns image with detections on it
-@app.route('/image', methods= ['POST'])
-def get_image():
-    image = request.files["images"]
-    image_name = image.filename
-    image.save(os.path.join(os.getcwd(), image_name))
-    img_raw = tf.image.decode_image(
-        open(image_name, 'rb').read(), channels=3)
-    img = tf.expand_dims(img_raw, 0)
-    img = transform_images(img, size)
+        cursor.execute("INSERT INTO DetectionSessions (SessionId) VALUES (?)", session_id)
 
-    t1 = time.time()
-    boxes, scores, classes, nums = yolo(img)
-    t2 = time.time()
-    print('time: {}'.format(t2 - t1))
+        for r in response:
+            cursor.execute("INSERT INTO Detections (SessionId, Detections, ImageIndex) VALUES (?, ?, ?)", session_id, r['detections'], r['image_index'])
 
-    print('detections:')
-    for i in range(nums[0]):
-        print('\t{}, {}, {}'.format(class_names[int(classes[0][i])],
-                                        np.array(scores[0][i]),
-                                        np.array(boxes[0][i])))
-    img = cv2.cvtColor(img_raw.numpy(), cv2.COLOR_RGB2BGR)
-    img = draw_outputs(img, (boxes, scores, classes, nums), class_names)
-    cv2.imwrite(output_path + 'detection.jpg', img)
-    print('output saved to: {}'.format(output_path + 'detection.jpg'))
+        conn.commit()
+
+        
+      
     
-    # prepare image for response
-    _, img_encoded = cv2.imencode('.png', img)
-    response = img_encoded.tostring()
-    
-    #remove temporary image
-    os.remove(image_name)
+class Detection(Resource):
+        def get(self, session_id):
+            conn = get_db_connection()
+            cursor = conn.cursor()
 
-    try:
-        return Response(response=response, status=200, mimetype='image/png')
-    except FileNotFoundError:
-        abort(404)
+            query = f"""SELECT *
+                    FROM DetectionSessions as s
+                    LEFT JOIN Detections as d
+                    ON s.SessionId = d.SessionId
+                    WHERE s.SessionId = {session_id}"""
+            cursor.execute(query)
+            results = cursor.fetchall()
+
+            if not results:
+                return {"error": "No detections found for the provided session ID"}, 404
+
+            detections = []
+            for result in results:
+                detection = {
+                    "SessionId": result[0],
+                    "DetectionId": result[2],
+                    "ImageIndex": result[4],
+                }
+                detections.append(detection)
+
+            return {"detections": detections}, 200
+        
+
+        def delete(self, session_id):
+            conn = get_db_connection()
+            cursor = conn.cursor()
+
+            # Delete records from the Detections table
+             # Delete records from the Detections table
+            query_detections = f"DELETE FROM Detections WHERE SessionId = {session_id}"
+            cursor.execute(query_detections)
+
+            # Delete record from the DetectionSessions table
+            query_sessions = f"DELETE FROM DetectionSessions WHERE SessionId = {session_id}"
+            cursor.execute(query_sessions)
+
+            # Check if any rows were affected
+            if cursor.rowcount == 0:
+                return {"error": f"No session found for the provided session ID: {session_id}"}, 404
+
+            conn.commit()
+
+            return {"result": "Session and related detections deleted successfully"}, 200
+        
+
+class UpFlightPlan(Resource):
+    def post(self):
+        flight_plan = request.json
+        print("Flight plan received:", flight_plan)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        # Connect to the drone
+        cursor.execute("INSERT INTO FlightPlans (FlightPlanJSON) VALUES (?)", json.dumps(flight_plan))
+        conn.commit()
+        
+        return {"result": "Flight plan stored successfully"}, 200    
+    
+
+
+class SetFlightPlan(Resource):
+
+    def post(self):
+        
+        flight_plan = request.json
+
+        # Convert the flight plan to MAVLink mission items
+        mission_items = generate_mavlink_mission_items(flight_plan)
+
+        # Store the MAVLink mission items in the database
+        store_flight_plan_in_database(flight_plan, mission_items)
+
+        return jsonify({'status': 'success', 'message': 'Flight plan saved'})
+
+
+def store_flight_plan_in_database(flight_plan, mission_items):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # Create a new FlightPlan instance
+    cursor.execute("INSERT INTO FlightPlans DEFAULT VALUES")
+    conn.commit()
+
+    # Get the ID of the last inserted FlightPlan
+    flight_plan_id = cursor.execute("SELECT @@IDENTITY").fetchval()
+
+    # Create and store MissionItem instances for each MAVLink mission item
+    for mission_item in mission_items:
+        cursor.execute("""INSERT INTO MissionItems
+                        (FlightPlanId, Seq, Command, Param1, Param2, Param3, Param4, X, Y, Z, Frame, [Current], Autocontinue)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    flight_plan_id, mission_item.seq, mission_item.command,
+                    mission_item.param1, mission_item.param2, mission_item.param3, mission_item.param4,
+                    mission_item.x, mission_item.y, mission_item.z,
+                    mission_item.frame, mission_item.current, mission_item.autocontinue)
+        conn.commit()
+
+    conn.close()
+
+
+
+
+def generate_mavlink_mission_items(flight_plan):
+    mission_items = []
+
+    for command in flight_plan["flightPlan"]:
+        waypoint_id = command.get("waypointId", 0)
+        mav_command = command.get("mavCommand", 0)
+        mav_parameters = command.get("mavParameters", [0] * 7)
+
+        mission_item = mavutil.mavlink.MAVLink_mission_item_message(
+            target_system=0,
+            target_component=0,
+            seq=waypoint_id,
+            command=mav_command,
+            param1=mav_parameters[0],
+            param2=mav_parameters[1],
+            param3=mav_parameters[2],
+            param4=mav_parameters[3],
+            x=mav_parameters[4],
+            y=mav_parameters[5],
+            z=mav_parameters[6],
+            frame=mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            current=0,
+            autocontinue=1,
+        )
+
+        mission_items.append(mission_item)
+
+    return mission_items
+
+
+
+
+
+
+
+
+        
+api.add_resource(DetectionSession, '/sessions/int:session_id', methods=['GET'])
+api.add_resource(DetectionSessionPost, '/sessions', methods=['POST'])
+api.add_resource(Detection, '/detection/<int:session_id>')
+api.add_resource(UpFlightPlan, '/flight_plan', methods=['POST'])
+api.add_resource(SetFlightPlan, '/save_flight_plan', methods=['POST'])
+
 if __name__ == '__main__':
-    app.run(debug=True, host = '0.0.0.0', port=5000)
+    app.run(debug=True)
