@@ -4,6 +4,7 @@ import time
 import pyodbc
 import cv2
 import numpy as np
+import math
 import tensorflow as tf
 from flask import Flask, request, jsonify
 from flask_restful import reqparse, Api, Resource
@@ -72,28 +73,40 @@ class DetectionSessionPost(Resource):
 
         # Generate session ID
         session_id = int(f"{local_time.tm_year}{local_time.tm_mon:02d}{local_time.tm_mday:02d}{local_time.tm_hour:02d}{local_time.tm_min:02d}{local_time.tm_sec:02d}")
-
+        img_dict = {}
         for image in images:
             image.save(os.path.join(os.getcwd(), image.filename))
             img_raw = tf.image.decode_image(
                 open(image.filename, 'rb').read(), channels=3)
             raw_images.append(img_raw)
+            img_dict[img_raw] = image.filename
 
         response = []
-
+        center_pixels = []
         for j, raw_img in enumerate(raw_images):
             img = tf.expand_dims(raw_img, 0)
             img = transform_images(img, size)
             boxes, scores, classes, nums = yolo(img)
+            # Load the image using OpenCV
+            image = cv2.imread(img_dict[img_raw])
 
+            # Get the height and width of the input image
+            height, width, _ = img.shape
             detected_count = 0
             for i in range(nums[0]):
                 if class_names[int(classes[0][i])] == "person" and float("{0:.2f}".format(np.array(scores[0][i]) * 100)) >= 85.50:
                     detected_count += 1
+                    # These values are normalized
+                    xmin, ymin, xmax, ymax = boxes
+                    center_x = int((xmin+xmax)/2 * width)
+                    center_y = int((ymin+ymax)/2 * height)
+                    #Center_pixels must be actual pixel values rather than normalized values
+                    center_pixels.append((center_x, center_y))
 
             response.append({
                 "image_index": j + 1,
-                "detections": detected_count
+                "detections": detected_count,
+                "centers": center_pixels
             })
 
         # Save session and detections into the Azure SQL tables
@@ -103,7 +116,7 @@ class DetectionSessionPost(Resource):
         cursor.execute("INSERT INTO DetectionSessions (SessionId) VALUES (?)", session_id)
 
         for r in response:
-            cursor.execute("INSERT INTO Detections (SessionId, Detections, ImageIndex) VALUES (?, ?, ?)", session_id, r['detections'], r['image_index'])
+            cursor.execute("INSERT INTO Detections (SessionId, Detections, ImageIndex, Centers) VALUES (?, ?, ?, ?)", session_id, r['detections'], r['image_index'], r['centers'])
 
         conn.commit()
 
@@ -246,7 +259,73 @@ def generate_mavlink_mission_items(flight_plan):
     return mission_items
 
 
+# Function that returns a list of lists distances from a person to the camera
+def distances_from_center():
+    # Camera is located at (0, 0, 20), probably should be obtained from drone/gopro itself
+    # This code assumes that the camera is pointed at a 45 degree angle
+    camera_height = 20
 
+    # Fields of view of the gopro in linear setting
+    fov_horizontal = 87
+    fov_vertical = 56
+    fov_diagonal = 95
+
+    # Pixel resolution of the camera
+    resolution_x = 1920
+    resolution_y = 1080
+
+    # Connect to db and obtain list of all processed images
+    conn = get_db_connection
+    cur = conn.cursor()
+    # The table needs to have the x_coord, y_coord of the center where the person was detected
+    cur.execute('SELECT centers FROM dbo.Detections') 
+    
+
+    # List of objects with their x and y pixel coordinates relative to the center of the screen
+    coordinates = cur.fetchall()
+    distances_list = []
+
+
+    for list in coordinates:
+        # List of distances from object to camera
+        distances = []
+        for x_pixel, y_pixel in list:
+            # Convert pixel coordinates to angular distance from center of screen
+            angle_x = math.atan((x_pixel - resolution_x/2) / (resolution_x/2) * math.tan(math.radians(fov_horizontal)/2))
+            angle_y = math.atan((y_pixel - resolution_y/2) / (resolution_y/2) * math.tan(math.radians(fov_vertical)/2))
+            
+            # Calculate the diagonal angle
+            angle_diagonal = math.atan(math.sqrt(math.tan(angle_x)**2 + math.tan(angle_y)**2))
+            
+            # Calculate the distance to the object
+            tan_half_fov_diagonal = math.tan(math.radians(fov_diagonal)/2)
+            object_distance_from_center = tan_half_fov_diagonal * camera_height / math.sqrt(1 + tan_half_fov_diagonal**2)
+            d = object_distance_from_center / math.cos(angle_diagonal)
+            distances.append[d]
+            # Limit precision to 2 decimal places
+            print("Object at ({}, {}): {:.2f} feet away".format(x_pixel, y_pixel, d))
+        distances_list.append(distances)
+    return distances_list
+
+
+# TODO finish this
+def distance_to_latlong(distances_list):
+    # Degrees the camera is pointing clockwise from north
+    angle = 0 # Need to decide this
+    
+    conn = get_db_connection
+    cursor = conn.cursor()
+    cursor.execute("SELECT latitude, longitude FROM dbo.Location WHERE Id IN (SELECT DetectionId FROM dbo.Detections")
+    results = cursor.fetchall() 
+    # Camera location
+    camera_lat = results[0]
+    camera_lon = results[1]
+    for [x_distance, y_distance] in distances_list:
+        relative_angle = 0
+
+
+    # Ends on this
+    # cursor.execute("INSERT INTO HeatmapInput date, park, locations VALUES (?, ? ,?)", date, park, distanceJSON)
 
 
 
