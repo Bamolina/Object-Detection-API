@@ -98,9 +98,11 @@ class DetectionSessionPost(Resource):
                     detected_count += 1
                     # These values are normalized
                     xmin, ymin, xmax, ymax = boxes
+
+                    #Center_pixels must be actual pixel values rather than normalized values
                     center_x = int((xmin+xmax)/2 * width)
                     center_y = int((ymin+ymax)/2 * height)
-                    #Center_pixels must be actual pixel values rather than normalized values
+                    
                     center_pixels.append((center_x, center_y))
 
             response.append({
@@ -337,8 +339,8 @@ def distance_to_latlong(distances_list):
         lng = camera_lon + distance * math.sin(math.radians(absolute_angle)) / (288200.0 * math.cos(math.radians(camera_lat)))
         formatted_lat = "{:.14f}".format(lat) 
         formatted_lng ="{:.14f}".format(lng)
-        # If there is a very small difference in location then add 1 to the count
-        # And don't add it to the dict
+        # If there is a very small difference in location
+        # Then add 1 to the count and don't add it to the dict
         if "{:.13f}".format(lat) in heatmap_count.values():
             if "{:.13f}".format(lng) in heatmap_count.values():
                 heatmap_count["count"] += 1
@@ -350,7 +352,8 @@ def distance_to_latlong(distances_list):
         data.append(heatmap_count)
     distanceJSON = "{" + data + "}"
     query = "SELECT CreatedAt FROM DetectionSessions WHERE SessionID IN SELECT SessionID FROM Detections"
-    date = cursor.execute(query)
+    cursor.execute(query)
+    date = cursor.fetchone()
 
 
     # TODO finish the park variable assignment
@@ -359,7 +362,8 @@ def distance_to_latlong(distances_list):
     park = "UTEP"
 
     # Ends on this
-    cursor.execute("INSERT INTO HeatmapInput date, park, locations VALUES (?, ? ,?)", date, park, distanceJSON)
+    cursor.execute("INSERT INTO HeatmapInput date, park, locations VALUES (?, ? ,?)", date.CreatedAt, park, distanceJSON)
+    conn.commit()
 
 
 
