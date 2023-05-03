@@ -263,7 +263,7 @@ def generate_mavlink_mission_items(flight_plan):
 def distances_from_center():
     # Camera is located at (0, 0, 20), probably should be obtained from drone/gopro itself
     # This code assumes that the camera is pointed at a 45 degree angle
-    camera_height = 20
+    camera_height = 5
 
     # Fields of view of the gopro in linear setting
     fov_horizontal = 87
@@ -310,8 +310,9 @@ def distances_from_center():
 
 # TODO finish this
 def distance_to_latlong(distances_list):
+    # This method assumes feet
     # Degrees the camera is pointing clockwise from north
-    angle = 0 # Need to decide this
+    angle = 0 
     
     conn = get_db_connection
     cursor = conn.cursor()
@@ -320,12 +321,45 @@ def distance_to_latlong(distances_list):
     # Camera location
     camera_lat = results[0]
     camera_lon = results[1]
+    data = []
+    heatmap_count = {}
     for [x_distance, y_distance] in distances_list:
-        relative_angle = 0
+        # Calculate the relative angle between the camera and the point
+        relative_angle = math.atan2(y_distance, x_distance)
+        # Calculate the distance between the camera and the point
+        distance = math.sqrt(x_distance ** 2 + y_distance ** 2)
+        # Calculate the absolute angle between the north and the point
+        absolute_angle = angle + math.degrees(relative_angle)
+        # Calculate the lat-long coordinates of the point
+        # 1 degree of latitude is equal to 364624 feet
+        lat = camera_lat + distance * math.cos(math.radians(absolute_angle)) / 364624.0
+        # 1 degree of longitude is equal to 288200 feet
+        lng = camera_lon + distance * math.sin(math.radians(absolute_angle)) / (288200.0 * math.cos(math.radians(camera_lat)))
+        formatted_lat = "{:.14f}".format(lat) 
+        formatted_lng ="{:.14f}".format(lng)
+        # If there is a very small difference in location then add 1 to the count
+        # And don't add it to the dict
+        if "{:.13f}".format(lat) in heatmap_count.values():
+            if "{:.13f}".format(lng) in heatmap_count.values():
+                heatmap_count["count"] += 1
+                pass
+        heatmap_count.update({"lat": {formatted_lat}, "lng":  {formatted_lng}, "count": 1})
+        
 
+        # Append the lat-long coordinates to the list
+        data.append(heatmap_count)
+    distanceJSON = "{" + data + "}"
+    query = "SELECT CreatedAt FROM DetectionSessions WHERE SessionID IN SELECT SessionID FROM Detections"
+    date = cursor.execute(query)
+
+
+    # TODO finish the park variable assignment
+    # Should be along the lines of Select park from [some table] where either
+    # SessionID or some other variable is in the table
+    park = "UTEP"
 
     # Ends on this
-    # cursor.execute("INSERT INTO HeatmapInput date, park, locations VALUES (?, ? ,?)", date, park, distanceJSON)
+    cursor.execute("INSERT INTO HeatmapInput date, park, locations VALUES (?, ? ,?)", date, park, distanceJSON)
 
 
 
